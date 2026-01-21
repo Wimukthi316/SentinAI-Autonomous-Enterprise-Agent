@@ -4,17 +4,19 @@ Handles autonomous agent orchestration using LangChain and Google Gemini.
 """
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import AgentExecutor, create_structured_chat_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import Tool, StructuredTool
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 
 from ..processors.audio_processor import AudioProcessor
 from ..processors.document_processor import DocumentProcessor
 from ..models.ticket_classifier import TicketClassifier
+from ..db.vector_store import VectorStoreManager
 
 
 class AudioTranscribeInput(BaseModel):
@@ -51,16 +53,23 @@ class SentinAIOrchestrator:
         self.audio_processor: Optional[AudioProcessor] = None
         self.document_processor: Optional[DocumentProcessor] = None
         self.ticket_classifier: Optional[TicketClassifier] = None
+        self.vector_store: Optional[VectorStoreManager] = None
         self.llm: Optional[ChatGoogleGenerativeAI] = None
         self.agent_executor: Optional[AgentExecutor] = None
         self._initialized = False
+        self._last_tool_results: Dict[str, Any] = {}
 
     def _initialize_processors(self) -> None:
         """Initialize all processor components."""
         self.audio_processor = AudioProcessor()
         self.document_processor = DocumentProcessor()
         self.ticket_classifier = TicketClassifier()
+        self.vector_store = VectorStoreManager(api_key=self.api_key)
         
+        # Initialize vector store
+        self.vector_store.initialize()
+        
+        # Train classifier if needed
         if not hasattr(self.ticket_classifier.pipeline, "classes_"):
             self.ticket_classifier.train_default_model()
 
@@ -68,22 +77,102 @@ class SentinAIOrchestrator:
         """Create LangChain tools from processors."""
         
         def transcribe_audio(file_path: str) -> str:
-            result = self.audio_processor.transcribe(file_path)
-            if result["status"] == "success":
-                return f"Transcription: {result['text']} (Language: {result['language']})"
-            return f"Error: {result['message']}"
+            """Transcribe audio file to text using Whisper AI."""
+            try:
+                result = self.audio_processor.transcribe(file_path)
+                self._last_tool_results['transcribe_audio'] = result
+                
+                if result["status"] == "success":
+                    text = result['text']
+                    language = result['language']
+                    
+                    # Save to vector store for memory
+                    if self.vector_store:
+                        self.vector_store.add_documents(
+                            texts=[text],
+                            metadatas=[{"source": "audio_transcription", "file": file_path, "language": language}]
+                        )
+                    
+                    return (
+                        f"TRANSCRIPTION SUCCESSFUL\n"
+                        f"Detected Language: {language}\n"
+                        f"Transcribed Text: {text}\n\n"
+                        f"The audio has been transcribed and saved to memory."
+                    )
+                else:
+                    return (
+                        f"TRANSCRIPTION FAILED\n"
+                        f"Error: {result['message']}\n"
+                        f"Possible reasons: File not found, unsupported format, or corrupted audio file."
+                    )
+            except Exception as e:
+                return f"TRANSCRIPTION ERROR: {str(e)}"
 
         def query_document(file_path: str, query: str) -> str:
-            result = self.document_processor.extract_info(file_path, query)
-            if result["status"] == "success":
-                return f"Answer: {result['answer']} (Confidence: {result['confidence_score']:.2%})"
-            return f"Error: {result['message']}"
+            """Extract information from PDF or image documents using LayoutLM."""
+            try:
+                result = self.document_processor.extract_info(file_path, query)
+                self._last_tool_results['query_document'] = result
+                
+                if result["status"] == "success":
+                    answer = result['answer']
+                    confidence = result['confidence_score']
+                    
+                    # Save to vector store for memory
+                    if self.vector_store:
+                        self.vector_store.add_documents(
+                            texts=[f"Question: {query}\nAnswer: {answer}"],
+                            metadatas=[{"source": "document_qa", "file": file_path, "confidence": confidence}]
+                        )
+                    
+                    return (
+                        f"DOCUMENT ANALYSIS SUCCESSFUL\n"
+                        f"Question: {query}\n"
+                        f"Answer: {answer}\n"
+                        f"Confidence Score: {confidence:.2%}\n\n"
+                        f"The information has been extracted and saved to memory."
+                    )
+                else:
+                    return (
+                        f"DOCUMENT ANALYSIS FAILED\n"
+                        f"Error: {result['message']}\n"
+                        f"Possible reasons: File not found, unsupported format, or model error."
+                    )
+            except Exception as e:
+                return f"DOCUMENT ANALYSIS ERROR: {str(e)}"
 
         def classify_ticket(text: str) -> str:
-            result = self.ticket_classifier.predict(text)
-            if result["status"] == "success":
-                return f"Category: {result['category']} (Probability: {result['probability']:.2%})"
-            return f"Error: {result['message']}"
+            """Classify support ticket into Billing, Technical, or Account categories."""
+            try:
+                result = self.ticket_classifier.predict(text)
+                self._last_tool_results['classify_ticket'] = result
+                
+                if result["status"] == "success":
+                    category = result['category']
+                    probability = result['probability']
+                    
+                    # Save to vector store for memory
+                    if self.vector_store:
+                        self.vector_store.add_documents(
+                            texts=[text],
+                            metadatas=[{"source": "ticket_classification", "category": category, "probability": probability}]
+                        )
+                    
+                    return (
+                        f"TICKET CLASSIFICATION SUCCESSFUL\n"
+                        f"Ticket Text: {text}\n"
+                        f"Category: {category}\n"
+                        f"Confidence: {probability:.2%}\n\n"
+                        f"This ticket has been categorized and saved to memory."
+                    )
+                else:
+                    return (
+                        f"TICKET CLASSIFICATION FAILED\n"
+                        f"Error: {result['message']}\n"
+                        f"Possible reasons: Model not trained or invalid input text."
+                    )
+            except Exception as e:
+                return f"TICKET CLASSIFICATION ERROR: {str(e)}"
 
         tools = [
             StructuredTool.from_function(
@@ -113,34 +202,86 @@ class SentinAIOrchestrator:
 
     def _create_agent(self, tools: list) -> AgentExecutor:
         """Create the LangChain agent with tools."""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are SentinAI, an autonomous AI assistant with access to specialized tools.
-            
+        
+        # System message for the structured chat agent
+        system_message = """You are SentinAI, an autonomous enterprise AI agent with access to specialized processing tools.
+
 Your capabilities:
-1. transcribe_audio: Convert speech in audio files to text
-2. query_document: Extract information from PDFs and images
-3. classify_ticket: Categorize support tickets
+1. transcribe_audio: Convert speech from audio files to text using Whisper AI
+2. query_document: Extract information from PDF or image documents using LayoutLM  
+3. classify_ticket: Categorize support tickets into Billing, Technical, or Account categories
 
-Analyze the user's input and determine the appropriate tool to use:
-- If given an audio file path, use transcribe_audio
-- If given a document file path with a question, use query_document
-- If given text that looks like a support request, use classify_ticket
-- If the input is ambiguous, ask for clarification
+IMPORTANT INSTRUCTIONS:
+- When a tool returns results, YOU MUST include the actual data in your response to the user
+- DO NOT give generic responses like "I processed your request"
+- Extract key information from tool outputs and present it clearly
+- If a tool returns an error, explain what went wrong and suggest solutions
+- For transcriptions: Quote the transcribed text
+- For document queries: Provide the extracted answer and confidence score
+- For ticket classification: State the category and confidence level
 
-Always provide clear, helpful responses based on the tool outputs."""),
+Analyze the user's input and select the appropriate tool:
+- Audio file path (.mp3, .wav, .m4a, etc.) → use transcribe_audio
+- Document file path (.pdf, .jpg, .png, etc.) with a question → use query_document
+- Text that appears to be a customer support request → use classify_ticket
+
+Always provide detailed, informative responses based on the actual tool outputs.
+
+You have access to the following tools:
+
+{tools}
+
+Use a json blob to specify a tool by providing an action key (tool name) and an action_input key (tool input).
+
+Valid "action" values: "Final Answer" or {tool_names}
+
+Provide only ONE action per $JSON_BLOB, as shown:
+
+```
+{{
+  "action": $TOOL_NAME,
+  "action_input": $INPUT
+}}
+```
+
+Follow this format:
+
+Question: input question to answer
+Thought: consider previous and subsequent steps
+Action:
+```
+$JSON_BLOB
+```
+Observation: action result
+... (repeat Thought/Action/Observation N times)
+Thought: I know what to respond
+Action:
+```
+{{
+  "action": "Final Answer",
+  "action_input": "Final response to human"
+}}
+```"""
+
+        human_message = """{input}
+
+{agent_scratchpad}"""
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_message),
             MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad")
+            ("human", human_message)
         ])
 
-        agent = create_tool_calling_agent(self.llm, tools, prompt)
+        agent = create_structured_chat_agent(self.llm, tools, prompt)
         
         return AgentExecutor(
             agent=agent,
             tools=tools,
             verbose=True,
             handle_parsing_errors=True,
-            max_iterations=5
+            max_iterations=5,
+            return_intermediate_steps=True
         )
 
     def initialize(self) -> Dict[str, str]:

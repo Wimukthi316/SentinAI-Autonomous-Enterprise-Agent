@@ -5,8 +5,14 @@ An autonomous AI agent powered by LangChain, Google Gemini API, and Whisper AI
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+import os
 
-from api.routes import health, agents
+# Load environment variables from .env file
+load_dotenv()
+
+from app.api.routes import agents
+from api.routes import health
 
 app = FastAPI(
     title="SentinAI API",
