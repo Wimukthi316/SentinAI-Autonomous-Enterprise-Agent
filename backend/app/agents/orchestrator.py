@@ -11,7 +11,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import Tool, StructuredTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
-from pydantic import BaseModel, Field
+# Use langchain's pydantic v1 for tool schema compatibility
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 from ..processors.audio_processor import AudioProcessor
 from ..processors.document_processor import DocumentProcessor
@@ -299,7 +300,7 @@ Action:
 
         try:
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-pro",
+                model="gemini-2.0-flash",
                 google_api_key=self.api_key,
                 temperature=0.1,
                 convert_system_message_to_human=True
