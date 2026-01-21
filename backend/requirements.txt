@@ -3,14 +3,34 @@ fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 
-# AI/ML Tools
+# AI/ML Tools - LangChain
 langchain>=0.1.0
 langchain-google-genai>=0.0.6
+langchain-chroma>=0.1.0
+langchain-core>=0.1.0
+
+# Google AI
 google-generativeai>=0.3.0
+
+# Whisper AI
 openai-whisper>=20231117
+torch>=2.0.0
+
+# Document Processing
+transformers>=4.36.0
+pdf2image>=1.16.0
+Pillow>=10.0.0
+
+# ML/Predictive Models
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Vector Database
+chromadb>=0.4.0
 
 # Utilities
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 httpx>=0.26.0
+

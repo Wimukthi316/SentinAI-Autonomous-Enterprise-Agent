@@ -1,0 +1,1 @@
+"""SentinAI backend app module."""
