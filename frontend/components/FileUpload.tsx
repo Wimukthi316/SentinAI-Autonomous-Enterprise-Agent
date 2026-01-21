@@ -112,7 +112,7 @@ export default function FileUpload({ onUpload, isProcessing }: FileUploadProps) 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            {...getRootProps()}
+            {...(({ onAnimationStart, onDragStart, onDrag, onDragEnd, ...rest }) => rest)(getRootProps())}
             className={`relative border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all ${
               isDragActive
                 ? "border-violet-500 bg-violet-500/10"
