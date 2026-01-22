@@ -52,4 +52,6 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
+    # Change to the backend directory for proper module resolution
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

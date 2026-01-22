@@ -19,12 +19,18 @@ orchestrator: Optional[SentinAIOrchestrator] = None
 
 
 def get_orchestrator() -> SentinAIOrchestrator:
-    """Get or create the orchestrator singleton."""
+    """Get or create the orchestrator singleton (lazy initialization)."""
     global orchestrator
     if orchestrator is None:
         orchestrator = SentinAIOrchestrator()
+    
+    # Initialize only when first needed (not on import)
+    if not orchestrator._initialized and not orchestrator._rate_limit_hit:
         init_result = orchestrator.initialize()
         if init_result["status"] == "error":
+            # Don't raise exception for rate limit - let the execute method handle it gracefully
+            if "quota" in init_result["message"].lower():
+                return orchestrator
             raise HTTPException(status_code=500, detail=init_result["message"])
     return orchestrator
 
@@ -133,10 +139,15 @@ async def process_input(
         if file and file.filename:
             file_extension = os.path.splitext(file.filename)[1].lower()
             
+            # Use absolute path for data directory
+            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            data_dir = os.path.join(backend_dir, "data")
+            os.makedirs(data_dir, exist_ok=True)
+            
             with tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=file_extension,
-                dir=os.path.join(os.path.dirname(__file__), "..", "..", "data")
+                dir=data_dir
             ) as temp_file:
                 content = await file.read()
                 temp_file.write(content)

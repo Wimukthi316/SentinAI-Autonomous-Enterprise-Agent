@@ -4,15 +4,21 @@ Handles autonomous agent orchestration using LangChain and Google Gemini.
 """
 
 import os
+import time
+import logging
 from typing import Any, Dict, Optional, List
+from functools import lru_cache
 
 from langchain.agents import AgentExecutor, create_structured_chat_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import Tool, StructuredTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
+from google.api_core.exceptions import ResourceExhausted
 # Use langchain's pydantic v1 for tool schema compatibility
 from langchain_core.pydantic_v1 import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from ..processors.audio_processor import AudioProcessor
 from ..processors.document_processor import DocumentProcessor
@@ -59,6 +65,11 @@ class SentinAIOrchestrator:
         self.agent_executor: Optional[AgentExecutor] = None
         self._initialized = False
         self._last_tool_results: Dict[str, Any] = {}
+        # Rate limiting tracking
+        self._rate_limit_until: float = 0
+        self._request_count: int = 0
+        self._last_request_time: float = 0
+        self._rate_limit_hit: bool = False
 
     def _initialize_processors(self) -> None:
         """Initialize all processor components."""
@@ -281,7 +292,8 @@ Action:
             tools=tools,
             verbose=True,
             handle_parsing_errors=True,
-            max_iterations=5,
+            max_iterations=15,
+            max_execution_time=120,
             return_intermediate_steps=True
         )
 
@@ -299,21 +311,33 @@ Action:
             }
 
         try:
+            # Use gemini-2.5-flash-lite - separate quota bucket from gemini-2.5-flash
+            # Each model has its own 20 RPD quota on free tier
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-lite",  # Different model = different quota
                 google_api_key=self.api_key,
                 temperature=0.1,
-                convert_system_message_to_human=True
+                convert_system_message_to_human=True,
+                max_retries=2,  # Reduce retries to fail faster on quota exceeded
             )
 
             self._initialize_processors()
             tools = self._create_tools()
             self.agent_executor = self._create_agent(tools)
             self._initialized = True
+            self._rate_limit_hit = False  # Reset rate limit flag on successful init
 
             return {
                 "status": "success",
                 "message": "SentinAI Orchestrator initialized successfully"
+            }
+        except ResourceExhausted as e:
+            self._rate_limit_hit = True
+            self._rate_limit_until = time.time() + 60  # Wait at least 60 seconds
+            logger.warning(f"Rate limit hit during initialization: {e}")
+            return {
+                "status": "error",
+                "message": "Gemini API quota exceeded. Free tier limit is 20 requests/day. Please wait or upgrade to a paid plan."
             }
         except Exception as e:
             return {
@@ -338,6 +362,9 @@ Action:
         if not self._initialized:
             init_result = self.initialize()
             if init_result["status"] == "error":
+                # Try fallback mode if rate limited
+                if self._rate_limit_hit:
+                    return self._execute_fallback(input_data)
                 return init_result
 
         if not input_data or not input_data.strip():
@@ -346,20 +373,122 @@ Action:
                 "message": "Input data cannot be empty"
             }
 
+        # Check if we're in a rate limit cooldown period - use fallback mode
+        if self._rate_limit_hit and time.time() < self._rate_limit_until:
+            return self._execute_fallback(input_data)
+
         try:
             invoke_input = {"input": input_data}
             if chat_history:
                 invoke_input["chat_history"] = chat_history
 
             result = self.agent_executor.invoke(invoke_input)
+            
+            # Reset rate limit flag on successful execution
+            self._rate_limit_hit = False
 
             return {
                 "status": "success",
                 "response": result.get("output", "No response generated"),
                 "intermediate_steps": str(result.get("intermediate_steps", []))
             }
+        except ResourceExhausted as e:
+            self._rate_limit_hit = True
+            self._rate_limit_until = time.time() + 60
+            logger.warning(f"Rate limit hit: {e}")
+            return self._execute_fallback(input_data)
         except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "quota" in error_msg.lower() or "ResourceExhausted" in error_msg:
+                self._rate_limit_hit = True
+                self._rate_limit_until = time.time() + 60
+                return self._execute_fallback(input_data)
             return {
                 "status": "error",
-                "message": f"Execution failed: {str(e)}"
+                "message": f"Execution failed: {error_msg}"
             }
+
+    def _execute_fallback(self, input_data: str) -> Dict[str, Any]:
+        """
+        Execute in fallback mode without LLM when rate limited.
+        Uses simple pattern matching to route to appropriate tools.
+        """
+        input_lower = input_data.lower()
+        
+        # Initialize processors if not already done
+        if self.audio_processor is None:
+            try:
+                self._initialize_processors()
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"⚠️ Gemini API quota exceeded & fallback initialization failed: {str(e)}"
+                }
+        
+        # Pattern-based routing for audio files
+        audio_extensions = ('.mp3', '.wav', '.m4a', '.flac', '.ogg', '.webm')
+        if any(ext in input_lower for ext in audio_extensions):
+            # Extract file path from input
+            import re
+            path_match = re.search(r'[a-zA-Z]:[\\\/][^\s]+|\/[^\s]+', input_data)
+            if path_match:
+                file_path = path_match.group()
+                try:
+                    result = self.audio_processor.transcribe(file_path)
+                    if result["status"] == "success":
+                        return {
+                            "status": "success",
+                            "response": f"🎤 **Audio Transcription (Fallback Mode)**\n\n**Language:** {result['language']}\n\n**Transcription:**\n{result['text']}\n\n_Note: Running in fallback mode due to API quota limits._",
+                            "intermediate_steps": "[('transcribe_audio', 'fallback')]"
+                        }
+                    return {"status": "error", "message": result['message']}
+                except Exception as e:
+                    return {"status": "error", "message": f"Transcription failed: {str(e)}"}
+        
+        # Pattern-based routing for documents
+        doc_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+        if any(ext in input_lower for ext in doc_extensions):
+            import re
+            path_match = re.search(r'[a-zA-Z]:[\\\/][^\s]+|\/[^\s]+', input_data)
+            if path_match:
+                file_path = path_match.group()
+                # Extract question after common patterns
+                question_patterns = [r'question:\s*(.+)', r'query:\s*(.+)', r'\?\s*(.+)']
+                query = "Extract all text from this document"
+                for pattern in question_patterns:
+                    match = re.search(pattern, input_data, re.IGNORECASE)
+                    if match:
+                        query = match.group(1)
+                        break
+                try:
+                    result = self.document_processor.extract_info(file_path, query)
+                    if result["status"] == "success":
+                        return {
+                            "status": "success", 
+                            "response": f"📄 **Document Analysis (Fallback Mode)**\n\n**Question:** {query}\n\n**Answer:** {result['answer']}\n\n**Confidence:** {result['confidence_score']:.2%}\n\n_Note: Running in fallback mode due to API quota limits._",
+                            "intermediate_steps": "[('query_document', 'fallback')]"
+                        }
+                    return {"status": "error", "message": result['message']}
+                except Exception as e:
+                    return {"status": "error", "message": f"Document processing failed: {str(e)}"}
+        
+        # Pattern-based routing for ticket classification
+        ticket_keywords = ['issue', 'problem', 'help', 'support', 'ticket', 'billing', 'account', 'technical', 'error', 'not working', 'broken', 'charge', 'payment', 'refund', 'password', 'login']
+        if any(keyword in input_lower for keyword in ticket_keywords):
+            try:
+                result = self.ticket_classifier.predict(input_data)
+                if result["status"] == "success":
+                    return {
+                        "status": "success",
+                        "response": f"🏷️ **Ticket Classification (Fallback Mode)**\n\n**Text:** {input_data}\n\n**Category:** {result['category']}\n\n**Confidence:** {result['probability']:.2%}\n\n_Note: Running in fallback mode due to API quota limits._",
+                        "intermediate_steps": "[('classify_ticket', 'fallback')]"
+                    }
+                return {"status": "error", "message": result['message']}
+            except Exception as e:
+                return {"status": "error", "message": f"Classification failed: {str(e)}"}
+        
+        # Default fallback response
+        return {
+            "status": "error",
+            "message": "⚠️ **Gemini API quota exceeded** (20 requests/day on free tier)\n\n**Your options:**\n1. Wait until tomorrow for quota reset\n2. Upgrade at https://ai.google.dev/pricing\n3. Use a different API key\n\n**Available in fallback mode:**\n- Audio transcription (include file path)\n- Document analysis (include file path)\n- Ticket classification (describe your issue)"
+        }
