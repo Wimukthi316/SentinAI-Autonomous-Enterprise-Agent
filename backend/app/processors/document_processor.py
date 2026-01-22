@@ -154,13 +154,29 @@ class DocumentProcessor:
                               f"Supported formats: {self.supported_image_formats | {self.supported_pdf_format}}"
                 }
 
-            # Extract text with OCR and provide word_boxes to the pipeline
+            # Extract text with OCR and provide normalized word_boxes to the pipeline
             ocr_data = self._extract_text_with_ocr(image)
             
-            if ocr_data["words"]:
-                result = self.pipeline(image, query, word_boxes=ocr_data["boxes"])
+            def _normalize_boxes(boxes, img_width: int, img_height: int):
+                """Normalize absolute pixel boxes to 0-1000 scale required by LayoutLM."""
+                normalized = []
+                for box in boxes:
+                    x0, y0, x1, y1 = box
+                    # Avoid division by zero and clamp into [0, 1000]
+                    nx0 = int(max(0, min(1000, (x0 / max(1, img_width)) * 1000)))
+                    ny0 = int(max(0, min(1000, (y0 / max(1, img_height)) * 1000)))
+                    nx1 = int(max(0, min(1000, (x1 / max(1, img_width)) * 1000)))
+                    ny1 = int(max(0, min(1000, (y1 / max(1, img_height)) * 1000)))
+                    normalized.append([nx0, ny0, nx1, ny1])
+                return normalized
+
+            if ocr_data["words"] and ocr_data["boxes"]:
+                img_width, img_height = image.size
+                normalized_boxes = _normalize_boxes(ocr_data["boxes"], img_width, img_height)
+                word_boxes = list(zip(ocr_data["words"], normalized_boxes))
+                result = self.pipeline(image, query, word_boxes=word_boxes)
             else:
-                # Fallback: try without word boxes
+                # Fallback: let the pipeline do its own OCR
                 result = self.pipeline(image, query)
 
             if result and len(result) > 0:
