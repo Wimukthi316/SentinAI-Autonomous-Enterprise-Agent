@@ -9,6 +9,7 @@ from typing import Optional
 import torch
 from PIL import Image
 from transformers import pipeline
+import easyocr
 
 
 class DocumentProcessor:
@@ -31,8 +32,40 @@ class DocumentProcessor:
             model=model_name,
             device=self.device
         )
+        # Initialize EasyOCR reader
+        self.ocr_reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
         self.supported_image_formats = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
         self.supported_pdf_format = ".pdf"
+    
+    def _extract_text_with_ocr(self, image: Image.Image) -> dict:
+        """
+        Extract text from image using EasyOCR with bounding boxes.
+        
+        Args:
+            image: PIL Image object
+            
+        Returns:
+            Dictionary with 'words' and 'boxes' for LayoutLM
+        """
+        try:
+            import numpy as np
+            img_array = np.array(image)
+            ocr_results = self.ocr_reader.readtext(img_array)
+            
+            words = []
+            boxes = []
+            for (bbox, text, confidence) in ocr_results:
+                # Convert bbox to LayoutLM format [x0, y0, x1, y1]
+                x_coords = [point[0] for point in bbox]
+                y_coords = [point[1] for point in bbox]
+                box = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
+                
+                words.append(text)
+                boxes.append(box)
+            
+            return {"words": words, "boxes": boxes}
+        except Exception as e:
+            return {"words": [], "boxes": []}
 
     def _convert_pdf_to_image(self, pdf_path: str, page_number: int = 0) -> Optional[Image.Image]:
         """
@@ -121,7 +154,14 @@ class DocumentProcessor:
                               f"Supported formats: {self.supported_image_formats | {self.supported_pdf_format}}"
                 }
 
-            result = self.pipeline(image, query)
+            # Extract text with OCR and provide word_boxes to the pipeline
+            ocr_data = self._extract_text_with_ocr(image)
+            
+            if ocr_data["words"]:
+                result = self.pipeline(image, query, word_boxes=ocr_data["boxes"])
+            else:
+                # Fallback: try without word boxes
+                result = self.pipeline(image, query)
 
             if result and len(result) > 0:
                 return {

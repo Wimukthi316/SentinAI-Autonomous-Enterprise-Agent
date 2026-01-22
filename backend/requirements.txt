@@ -21,6 +21,8 @@ torch>=2.0.0
 transformers>=4.36.0
 pdf2image>=1.16.0
 Pillow>=10.0.0
+pytesseract>=0.3.10
+easyocr>=1.7.0
 
 # ML/Predictive Models
 scikit-learn>=1.3.0

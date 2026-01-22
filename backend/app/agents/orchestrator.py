@@ -122,7 +122,16 @@ class SentinAIOrchestrator:
 
         def query_document(file_path: str, query: str) -> str:
             """Extract information from PDF or image documents using LayoutLM."""
+            import os
             try:
+                # Validate file exists
+                if not os.path.exists(file_path):
+                    return (
+                        f"DOCUMENT ANALYSIS FAILED\n"
+                        f"Error: File not found at path: {file_path}\n"
+                        f"Please ensure the file path is correct."
+                    )
+                
                 result = self.document_processor.extract_info(file_path, query)
                 self._last_tool_results['query_document'] = result
                 
@@ -139,6 +148,7 @@ class SentinAIOrchestrator:
                     
                     return (
                         f"DOCUMENT ANALYSIS SUCCESSFUL\n"
+                        f"File: {os.path.basename(file_path)}\n"
                         f"Question: {query}\n"
                         f"Answer: {answer}\n"
                         f"Confidence Score: {confidence:.2%}\n\n"
@@ -147,11 +157,14 @@ class SentinAIOrchestrator:
                 else:
                     return (
                         f"DOCUMENT ANALYSIS FAILED\n"
+                        f"File: {file_path}\n"
                         f"Error: {result['message']}\n"
                         f"Possible reasons: File not found, unsupported format, or model error."
                     )
             except Exception as e:
-                return f"DOCUMENT ANALYSIS ERROR: {str(e)}"
+                import traceback
+                error_details = traceback.format_exc()
+                return f"DOCUMENT ANALYSIS ERROR: {str(e)}\n\nDebug info:\n{error_details}"
 
         def classify_ticket(text: str) -> str:
             """Classify support ticket into Billing, Technical, or Account categories."""
@@ -197,8 +210,11 @@ class SentinAIOrchestrator:
             StructuredTool.from_function(
                 func=query_document,
                 name="query_document",
-                description="Extract information from a document (PDF or image) by asking questions. "
-                           "Use this when given a document file path and a question about its contents.",
+                description="Extract information from PDF or image documents by asking questions using LayoutLM. "
+                           "REQUIRED when user provides any file path ending in .pdf, .jpg, .jpeg, .png, .bmp, or .tiff. "
+                           "Parameters: file_path (exact path from user), query (the question to ask about the document). "
+                           "Example: If user says 'Extract information from document at D:/file.pdf. Question: What is this', "
+                           "call with file_path='D:/file.pdf' and query='What is this'.",
                 args_schema=DocumentQueryInput
             ),
             StructuredTool.from_function(
@@ -222,6 +238,13 @@ Your capabilities:
 1. transcribe_audio: Convert speech from audio files to text using Whisper AI
 2. query_document: Extract information from PDF or image documents using LayoutLM  
 3. classify_ticket: Categorize support tickets into Billing, Technical, or Account categories
+
+CRITICAL RULES FOR TOOL USAGE:
+- ALWAYS use query_document for ANY file path containing .pdf, .jpg, .jpeg, .png, .bmp, or .tiff
+- NEVER attempt to process PDF or image files yourself - ALWAYS delegate to query_document tool
+- When you see "document at [path]", immediately use query_document with that path
+- The file_path parameter MUST be the exact path from the user's input
+- The query parameter should extract the question from the user's input
 
 IMPORTANT INSTRUCTIONS:
 - When a tool returns results, YOU MUST include the actual data in your response to the user

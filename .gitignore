@@ -30,6 +30,8 @@ backend/models/*
 
 # External dependencies
 backend/poppler/
+backend/tesseract/
+backend/tesseract-setup.exe
 
 # IDE
 .vscode/
