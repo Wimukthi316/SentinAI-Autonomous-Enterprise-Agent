@@ -51,11 +51,20 @@ class DocumentProcessor:
         try:
             from pdf2image import convert_from_path
             
+            # Poppler path for Windows
+            poppler_path = None
+            if os.name == 'nt':  # Windows
+                backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                poppler_bin = os.path.join(backend_dir, "poppler", "poppler-24.08.0", "Library", "bin")
+                if os.path.exists(poppler_bin):
+                    poppler_path = poppler_bin
+            
             images = convert_from_path(
                 pdf_path,
                 first_page=page_number + 1,
                 last_page=page_number + 1,
-                dpi=200
+                dpi=200,
+                poppler_path=poppler_path
             )
             
             if images:

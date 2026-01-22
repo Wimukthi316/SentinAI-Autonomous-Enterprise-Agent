@@ -28,6 +28,9 @@ backend/models/*
 *.onnx
 *.bin
 
+# External dependencies
+backend/poppler/
+
 # IDE
 .vscode/
 .idea/
